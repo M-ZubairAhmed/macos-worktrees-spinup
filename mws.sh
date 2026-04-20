@@ -11,9 +11,10 @@ Required:
 Commands:
 
   create <branch-name> [--base <branch>]
-    Create a git worktree, open iTerm2, start a Claude session, and launch Cursor.
-    If <branch-name> exists locally or on origin, it is reused. Otherwise a new
-    branch is created from --base (default: main), fetching origin/<base> first.
+    Create or reuse a git worktree, open iTerm2, start a Claude session, and
+    launch Cursor. If <branch-name> exists locally or on origin, it is reused.
+    Otherwise a new branch is created from --base (default: main), fetching
+    origin/<base> first.
 
     Examples:
       ./mws.sh create --dir ~/Workspace/mattermost/mattermost-plugin-calls MM-1234-fix-bug
@@ -61,39 +62,77 @@ cmd_create() {
     # Replace slashes in branch name for a safe directory name
     local dir_name="${branch_name//\//-}"
     local worktree_path="${repo_root}/../${repo_name}-${dir_name}"
+    local source_desc
+    local reused_existing_worktree="false"
 
-    # Bail early if directory already exists
+    # Reuse an existing matching worktree when the target directory already exists.
+    # Otherwise fail with a clear reason.
     if [[ -d "$worktree_path" ]]; then
-        echo "Error: directory already exists: ${worktree_path}" >&2
-        echo "Run './mws.sh remove ${branch_name}' first, or choose a different name." >&2
-        exit 1
+        local repo_common_dir expected_common_dir existing_common_dir existing_branch
+        repo_common_dir=$(git rev-parse --git-common-dir)
+        if [[ "$repo_common_dir" = /* ]]; then
+            expected_common_dir=$(cd "$repo_common_dir" && pwd)
+        else
+            expected_common_dir=$(cd "$repo_root/$repo_common_dir" && pwd)
+        fi
+        existing_common_dir=$(git -C "$worktree_path" rev-parse --git-common-dir 2>/dev/null || true)
+
+        if [[ -n "$existing_common_dir" ]]; then
+            if [[ "$existing_common_dir" = /* ]]; then
+                existing_common_dir=$(cd "$existing_common_dir" && pwd)
+            else
+                existing_common_dir=$(cd "$worktree_path/$existing_common_dir" && pwd)
+            fi
+            if [[ "$existing_common_dir" == "$expected_common_dir" ]]; then
+                existing_branch=$(git -C "$worktree_path" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+                if [[ "$existing_branch" == "$branch_name" ]]; then
+                    source_desc="existing worktree"
+                    reused_existing_worktree="true"
+                    echo "Reusing existing worktree..."
+                    echo "  Branch: ${branch_name} (${source_desc})"
+                else
+                    echo "Error: directory already exists but is checked out to '${existing_branch:-detached HEAD}': ${worktree_path}" >&2
+                    echo "Run './mws.sh remove ${existing_branch}' first, or choose a different name." >&2
+                    exit 1
+                fi
+            else
+                echo "Error: directory already exists and belongs to a different repository: ${worktree_path}" >&2
+                echo "Run './mws.sh remove ${branch_name}' first, or choose a different name." >&2
+                exit 1
+            fi
+        else
+            echo "Error: directory already exists and is not a git worktree: ${worktree_path}" >&2
+            echo "Run './mws.sh remove ${branch_name}' first, or choose a different name." >&2
+            exit 1
+        fi
     fi
 
     # Reuse the branch if it already exists locally or on origin; otherwise create it
-    local source_desc
-    if git show-ref --verify --quiet "refs/heads/${branch_name}"; then
-        source_desc="existing local branch"
-        echo "Creating worktree..."
-        echo "  Branch: ${branch_name} (${source_desc})"
-        git worktree add "$worktree_path" "$branch_name"
-    elif git show-ref --verify --quiet "refs/remotes/origin/${branch_name}"; then
-        source_desc="tracking origin/${branch_name}"
-        echo "Creating worktree..."
-        echo "  Branch: ${branch_name} (${source_desc})"
-        git worktree add -b "$branch_name" "$worktree_path" "origin/${branch_name}"
-    else
-        # New branch: fetch origin/<base> first so we start from the latest.
-        # If origin doesn't have <base> (purely local base), fall back to local.
-        local start_point="$base_branch"
-        if git ls-remote --exit-code --heads origin "$base_branch" >/dev/null 2>&1; then
-            echo "Fetching origin/${base_branch}..."
-            git fetch origin "$base_branch" || echo "  (fetch failed, using local ${base_branch})" >&2
-            start_point="origin/${base_branch}"
+    if [[ "$reused_existing_worktree" != "true" ]]; then
+        if git show-ref --verify --quiet "refs/heads/${branch_name}"; then
+            source_desc="existing local branch"
+            echo "Creating worktree..."
+            echo "  Branch: ${branch_name} (${source_desc})"
+            git worktree add "$worktree_path" "$branch_name"
+        elif git show-ref --verify --quiet "refs/remotes/origin/${branch_name}"; then
+            source_desc="tracking origin/${branch_name}"
+            echo "Creating worktree..."
+            echo "  Branch: ${branch_name} (${source_desc})"
+            git worktree add -b "$branch_name" "$worktree_path" "origin/${branch_name}"
+        else
+            # New branch: fetch origin/<base> first so we start from the latest.
+            # If origin doesn't have <base> (purely local base), fall back to local.
+            local start_point="$base_branch"
+            if git ls-remote --exit-code --heads origin "$base_branch" >/dev/null 2>&1; then
+                echo "Fetching origin/${base_branch}..."
+                git fetch origin "$base_branch" || echo "  (fetch failed, using local ${base_branch})" >&2
+                start_point="origin/${base_branch}"
+            fi
+            source_desc="new, based on ${start_point}"
+            echo "Creating worktree..."
+            echo "  Branch: ${branch_name} (${source_desc})"
+            git worktree add -b "$branch_name" "$worktree_path" "$start_point"
         fi
-        source_desc="new, based on ${start_point}"
-        echo "Creating worktree..."
-        echo "  Branch: ${branch_name} (${source_desc})"
-        git worktree add -b "$branch_name" "$worktree_path" "$start_point"
     fi
 
     # Resolve to absolute path
@@ -104,16 +143,24 @@ cmd_create() {
     # Pass path and branch as AppleScript argv so any quotes/apostrophes in them
     # can't break out of the heredoc or the inner shell command.
     # 'quoted form of' handles shell-escaping for iTerm2's shell session.
+    # Open two tabs: first for Claude, second as a plain shell in the worktree.
     osascript \
         -e 'on run argv
                 set thePath to item 1 of argv
                 set theBranch to item 2 of argv
-                set shellCmd to "cd " & quoted form of thePath & " && cursor . && claude --name " & quoted form of theBranch
+                set claudeCmd to "cd " & quoted form of thePath & " && cursor . && claude --name " & quoted form of theBranch
+                set cdCmd to "cd " & quoted form of thePath
                 tell application "iTerm2"
                     activate
                     set newWindow to (create window with default profile)
                     tell current session of newWindow
-                        write text shellCmd
+                        write text claudeCmd
+                    end tell
+                    tell newWindow
+                        create tab with default profile
+                    end tell
+                    tell current session of current tab of newWindow
+                        write text cdCmd
                     end tell
                 end tell
             end run' \
