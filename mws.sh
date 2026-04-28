@@ -3,32 +3,35 @@ set -euo pipefail
 
 usage() {
     cat <<'USAGE'
-Usage: ./mws.sh <command> --dir <path> [options] [<branch-name>]
+Usage: ./mws.sh <command> --dir <path> [options]
+
+Arguments may be provided in any order where unambiguous.
 
 Required:
   --dir <path>     Path to the git repository the command should run against.
+  --branch <name>  Branch name. Required for create/remove.
 
 Commands:
 
-  create <branch-name> [--base <branch>]
+  create --branch <name> [--base <branch>]
     Create or reuse a git worktree, open iTerm2, start a Claude session, and
     launch Cursor. If <branch-name> exists locally or on origin, it is reused.
     Otherwise a new branch is created from --base (default: main), fetching
     origin/<base> first.
 
     Examples:
-      ./mws.sh create --dir ~/Workspace/mattermost/mattermost-plugin-calls MM-1234-fix-bug
-      ./mws.sh create --dir ~/Workspace/mattermost/mattermost-plugin-calls --base release-9.0 feature/new-widget
-      ./mws.sh create --dir ~/Workspace/mattermost/mattermost-plugin-calls existing-branch
+      ./mws.sh create --dir ~/Workspace/mattermost/mattermost-plugin-calls --branch MM-1234-fix-bug
+      ./mws.sh create --dir ~/Workspace/mattermost/mattermost-plugin-calls --base release-9.0 --branch feature/new-widget 
+      ./mws.sh create --dir ~/Workspace/mattermost/mattermost-plugin-calls --branch existing-branch
 
-  remove <branch-name> [--force]
+  remove --branch <name> [--force]
     Remove a worktree and delete its branch. Refuses if the worktree has
     uncommitted changes or the branch is ahead of its upstream; --force skips
     these checks and discards the work.
 
     Examples:
-      ./mws.sh remove --dir ~/Workspace/mattermost/mattermost-plugin-calls MM-1234-fix-bug
-      ./mws.sh remove --dir ~/Workspace/mattermost/mattermost-plugin-calls --force MM-1234-fix-bug
+      ./mws.sh remove --dir ~/Workspace/mattermost/mattermost-plugin-calls --branch MM-1234-fix-bug
+      ./mws.sh remove --dir ~/Workspace/mattermost/mattermost-plugin-calls --branch MM-1234-fix-bug --force
 
   list
     List all worktrees in the repository (wraps 'git worktree list').
@@ -283,29 +286,30 @@ cmd_prune() {
 
 # --- Main ---
 
-command="${1:-}"
-case "$command" in
-    create|remove|rm|list|ls|prune)
-        shift
-        ;;
-    -h|--help|help|"")
-        usage
-        exit 0
-        ;;
-    *)
-        echo "Error: unknown command '${command}'" >&2
-        echo ""
-        usage
-        exit 1
-        ;;
-esac
-
-# Parse options (must come after the command, before the branch name)
+# Parse options and command in any order where unambiguous.
+command=""
 base_branch="main"
+branch_name=""
+branch_provided=""
 force=""
 dir_provided=""
+positional_args=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        -h|--help|help)
+            usage
+            exit 0
+            ;;
+        create|remove|rm|list|ls|prune)
+            if [[ -n "$command" ]]; then
+                echo "Error: multiple commands provided: ${command} and $1" >&2
+                echo ""
+                usage
+                exit 1
+            fi
+            command="$1"
+            shift
+            ;;
         --dir)
             if [[ $# -lt 2 ]]; then
                 echo "Error: --dir requires a path argument" >&2
@@ -323,12 +327,28 @@ while [[ $# -gt 0 ]]; do
             base_branch="$2"
             shift 2
             ;;
+        --branch)
+            if [[ $# -lt 2 ]]; then
+                echo "Error: --branch requires a branch name" >&2
+                exit 1
+            fi
+            if [[ "$branch_provided" == "true" ]]; then
+                echo "Error: --branch was provided more than once" >&2
+                echo ""
+                usage
+                exit 1
+            fi
+            branch_name="$2"
+            branch_provided="true"
+            shift 2
+            ;;
         --force|-f)
             force="true"
             shift
             ;;
         --)
             shift
+            positional_args+=("$@")
             break
             ;;
         -*)
@@ -338,10 +358,18 @@ while [[ $# -gt 0 ]]; do
             exit 1
             ;;
         *)
-            break
+            positional_args+=("$1")
+            shift
             ;;
     esac
 done
+
+if [[ -z "$command" ]]; then
+    echo "Error: command is required" >&2
+    echo ""
+    usage
+    exit 1
+fi
 
 if [[ "$dir_provided" != "true" ]]; then
     echo "Error: --dir <path> is required" >&2
@@ -352,8 +380,28 @@ fi
 
 case "$command" in
     create|remove|rm)
-        if [[ $# -lt 1 ]]; then
-            echo "Error: branch name is required" >&2
+        if [[ "$branch_provided" != "true" ]]; then
+            echo "Error: --branch <name> is required for '${command}'" >&2
+            echo ""
+            usage
+            exit 1
+        fi
+        if [[ ${#positional_args[@]} -gt 0 ]]; then
+            echo "Error: unexpected argument(s): ${positional_args[*]}" >&2
+            echo ""
+            usage
+            exit 1
+        fi
+        ;;
+    list|ls|prune)
+        if [[ "$branch_provided" == "true" ]]; then
+            echo "Error: --branch is not valid for '${command}'" >&2
+            echo ""
+            usage
+            exit 1
+        fi
+        if [[ ${#positional_args[@]} -gt 0 ]]; then
+            echo "Error: unexpected argument(s): ${positional_args[*]}" >&2
             echo ""
             usage
             exit 1
@@ -366,10 +414,10 @@ case "$command" in
         if [[ "$force" == "true" ]]; then
             echo "Warning: --force has no effect on create; ignoring" >&2
         fi
-        cmd_create "$1" "$base_branch"
+        cmd_create "$branch_name" "$base_branch"
         ;;
     remove|rm)
-        cmd_remove "$1" "$force"
+        cmd_remove "$branch_name" "$force"
         ;;
     list|ls)
         cmd_list
