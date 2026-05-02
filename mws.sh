@@ -134,7 +134,12 @@ cmd_create() {
             source_desc="new, based on ${start_point}"
             echo "Creating worktree..."
             echo "  Branch: ${branch_name} (${source_desc})"
-            git worktree add -b "$branch_name" "$worktree_path" "$start_point"
+            git worktree add -b "$branch_name" --no-track "$worktree_path" "$start_point"
+            # Point upstream at origin/<same-name>, not origin/<base>. The remote
+            # ref doesn't exist yet; the first push creates it, after which
+            # push/pull resolve to the matching remote branch.
+            git -C "$worktree_path" config "branch.${branch_name}.remote" origin
+            git -C "$worktree_path" config "branch.${branch_name}.merge" "refs/heads/${branch_name}"
         fi
     fi
 
