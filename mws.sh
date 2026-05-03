@@ -140,6 +140,10 @@ cmd_create() {
             # push/pull resolve to the matching remote branch.
             git -C "$worktree_path" config "branch.${branch_name}.remote" origin
             git -C "$worktree_path" config "branch.${branch_name}.merge" "refs/heads/${branch_name}"
+            # Record the base branch and creation time so 'list' can show
+            # where this branch came from and when it was created.
+            git -C "$worktree_path" config "branch.${branch_name}.mwsBase" "$base_branch"
+            git -C "$worktree_path" config "branch.${branch_name}.mwsCreatedAt" "$(date +%s)"
         fi
     fi
 
@@ -247,7 +251,102 @@ cmd_list() {
         echo "Error: not inside a git repository" >&2
         exit 1
     }
-    git worktree list
+
+    local base_dir repo_name
+    base_dir=$(pwd)
+    repo_name=$(basename "$base_dir")
+    shorten_path() {
+        local target="$1"
+        local target_abs
+        target_abs=$(cd "$target" 2>/dev/null && pwd) || { echo "$target"; return; }
+        if [[ "$target_abs" == "$base_dir" ]]; then
+            echo "."
+        elif [[ "$target_abs" == "$base_dir"/* ]]; then
+            echo "${target_abs#$base_dir/}"
+        elif [[ "$(dirname "$target_abs")" == "$(dirname "$base_dir")" ]]; then
+            echo "../$(basename "$target_abs")"
+        else
+            echo "${target_abs/#$HOME/~}"
+        fi
+    }
+
+    local rows=()
+    local path="" head="" branch=""
+    flush_row() {
+        if [[ -n "$path" ]]; then
+            local short_head="${head:0:7}"
+            local branch_display="${branch:-(detached)}"
+            local origin="-" base="-" created="-" mismatch=""
+            # Flag worktrees whose directory suffix doesn't match the dir-safe
+            # form of the checked-out branch (e.g., someone ran `git checkout`
+            # inside the worktree and orphaned its original branch).
+            if [[ -n "$branch" ]]; then
+                local dir_basename expected_suffix actual_suffix
+                dir_basename=$(basename "$path")
+                if [[ "$dir_basename" != "$repo_name" ]]; then
+                    expected_suffix="${branch//\//-}"
+                    actual_suffix="${dir_basename#${repo_name}-}"
+                    if [[ "$actual_suffix" != "$expected_suffix" ]]; then
+                        mismatch="!"
+                    fi
+                fi
+            fi
+            if [[ -n "$branch" && -d "$path" ]]; then
+                origin=$(git -C "$path" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || echo "-")
+                # Prefer the base recorded by 'create'; otherwise try to recover
+                # it from reflog (oldest 'branch: Created from <ref>' entry).
+                base=$(git -C "$path" config --get "branch.${branch}.mwsBase" 2>/dev/null || true)
+                if [[ -z "$base" ]]; then
+                    base=$(git -C "$path" reflog show --no-abbrev "$branch" 2>/dev/null \
+                        | awk -F'Created from ' '/Created from /{print $2}' \
+                        | tail -1)
+                    base="${base#refs/remotes/}"
+                    base="${base#refs/heads/}"
+                    base="${base:--}"
+                fi
+                # Prefer the timestamp recorded by 'create'; otherwise use the
+                # oldest reflog entry's timestamp as a proxy for branch birth.
+                local ts
+                ts=$(git -C "$path" config --get "branch.${branch}.mwsCreatedAt" 2>/dev/null || true)
+                if [[ -z "$ts" ]]; then
+                    ts=$(git -C "$path" reflog show --date=unix "$branch" 2>/dev/null \
+                        | tail -1 \
+                        | grep -oE '@\{[0-9]+\}' \
+                        | tr -d '@{}')
+                fi
+                if [[ -n "$ts" ]]; then
+                    created=$(date -r "$ts" "+%d-%m-%y %H:%M" 2>/dev/null || echo "-")
+                fi
+            fi
+            local display_path
+            display_path=$(shorten_path "$path")
+            local branch_cell="${mismatch:+! }${branch_display}"
+            # Prefix with sortable timestamp; unknown rows get a far-future value
+            # so they sink to the bottom under an ascending sort.
+            rows+=("${ts:-9999999999}"$'\t'"${branch_cell}"$'\t'"${base}"$'\t'"${origin}"$'\t'"${short_head}"$'\t'"${created}"$'\t'"${display_path}")
+        fi
+        path="" head="" branch=""
+    }
+    while IFS= read -r line; do
+        if [[ -z "$line" ]]; then
+            flush_row
+        elif [[ "$line" == "worktree "* ]]; then
+            path="${line#worktree }"
+        elif [[ "$line" == "HEAD "* ]]; then
+            head="${line#HEAD }"
+        elif [[ "$line" == "branch refs/heads/"* ]]; then
+            branch="${line#branch refs/heads/}"
+        elif [[ "$line" == "detached" ]]; then
+            branch=""
+        fi
+    done < <(git worktree list --porcelain; printf '\n')
+
+    {
+        printf 'BranchName\tBaseBranch\tGitOrigin\tHeadCommit\tCreatedAt\tLocalPath\n'
+        for row in "${rows[@]}"; do
+            printf '%s\n' "$row"
+        done | sort -t $'\t' -k1,1n | cut -f2-
+    } | column -t -s $'\t'
 }
 
 cmd_prune() {
