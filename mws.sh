@@ -292,7 +292,8 @@ cmd_list() {
                 fi
             fi
             if [[ -n "$branch" && -d "$path" ]]; then
-                origin=$(git -C "$path" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || echo "-")
+                origin=$(git -C "$path" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null) || origin="-"
+                [[ -z "$origin" ]] && origin="-"
                 # Prefer the base recorded by 'create'; otherwise try to recover
                 # it from reflog (oldest 'branch: Created from <ref>' entry).
                 base=$(git -C "$path" config --get "branch.${branch}.mwsBase" 2>/dev/null || true)
