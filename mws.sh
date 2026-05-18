@@ -162,7 +162,7 @@ cmd_create() {
                 set theBranch to item 2 of argv
                 set claudeCmd to "cd " & quoted form of thePath & " && cursor . && claude --name " & quoted form of theBranch
                 set cdCmd to "cd " & quoted form of thePath
-                tell application "iTerm2"
+                tell application id "com.googlecode.iterm2"
                     activate
                     set newWindow to (create window with default profile)
                     tell current session of newWindow
