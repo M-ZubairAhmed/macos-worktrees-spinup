@@ -150,17 +150,35 @@ cmd_create() {
     # Resolve to absolute path
     worktree_path=$(cd "$worktree_path" && pwd)
 
+    # If a prior Claude session for this worktree was tagged with --name <branch>,
+    # resume it by its session ID. Sessions live at
+    # ~/.claude/projects/<cwd-with-slashes-as-dashes>/<session-id>.jsonl and
+    # contain a {"type":"custom-title","customTitle":"<name>"} entry.
+    local claude_subcmd="--name ${branch_name}"
+    local claude_project_dir="${HOME}/.claude/projects/${worktree_path//\//-}"
+    local needle="\"customTitle\":\"${branch_name}\""
+    local f session_id=""
+    while IFS= read -r f; do
+        if grep -Fq "$needle" "$f"; then
+            session_id=$(basename "$f" .jsonl)
+            break
+        fi
+    done < <(ls -t "${claude_project_dir}"/*.jsonl 2>/dev/null)
+    if [[ -n "$session_id" ]]; then
+        claude_subcmd="--resume ${session_id}"
+    fi
+
     echo "Opening workspace..."
 
-    # Pass path and branch as AppleScript argv so any quotes/apostrophes in them
-    # can't break out of the heredoc or the inner shell command.
+    # Pass path, branch, and claude args as AppleScript argv so any quotes/apostrophes
+    # in them can't break out of the heredoc or the inner shell command.
     # 'quoted form of' handles shell-escaping for iTerm2's shell session.
     # Open two tabs: first for Claude, second as a plain shell in the worktree.
     osascript \
         -e 'on run argv
                 set thePath to item 1 of argv
-                set theBranch to item 2 of argv
-                set claudeCmd to "cd " & quoted form of thePath & " && cursor . && claude --name " & quoted form of theBranch
+                set theClaudeArgs to item 2 of argv
+                set claudeCmd to "cd " & quoted form of thePath & " && cursor . && claude " & theClaudeArgs
                 set cdCmd to "cd " & quoted form of thePath
                 tell application id "com.googlecode.iterm2"
                     activate
@@ -176,12 +194,17 @@ cmd_create() {
                     end tell
                 end tell
             end run' \
-        -- "$worktree_path" "$branch_name"
+        -- "$worktree_path" "$claude_subcmd"
 
     echo ""
     echo "Workspace ready!"
     echo "  Worktree : ${worktree_path}"
     echo "  Branch   : ${branch_name} (${source_desc})"
+    if [[ -n "$session_id" ]]; then
+        echo "  Claude   : resuming session ${session_id}"
+    else
+        echo "  Claude   : new session"
+    fi
 }
 
 cmd_remove() {
