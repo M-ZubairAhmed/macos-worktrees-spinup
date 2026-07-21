@@ -33,6 +33,17 @@ Commands:
       ./mws.sh remove --dir ~/Workspace/mattermost/mattermost-plugin-calls --branch MM-1234-fix-bug
       ./mws.sh remove --dir ~/Workspace/mattermost/mattermost-plugin-calls --branch MM-1234-fix-bug --force
 
+  multi-remove <name>... [--force]
+    Remove multiple worktrees in one call. Without --force, runs the same
+    safety checks as 'remove' across ALL branches first and aborts the entire
+    operation if ANY branch has uncommitted changes or unpushed commits — so
+    nothing is removed unless everything is safe. With --force, removes each
+    branch best-effort and continues past per-branch failures.
+
+    Examples:
+      ./mws.sh multi-remove --dir ~/Workspace/mattermost/mattermost-plugin-calls MM-1 MM-2 MM-3
+      ./mws.sh multi-remove --dir ~/Workspace/mattermost/mattermost-plugin-calls MM-1 MM-2 --force
+
   list
     List all worktrees in the repository (wraps 'git worktree list').
 
@@ -269,6 +280,105 @@ cmd_remove() {
     echo "Done."
 }
 
+cmd_multi_remove() {
+    local force="$1"; shift
+    local branches=("$@")
+
+    if (( ${#branches[@]} == 0 )); then
+        echo "Error: multi-remove requires at least one branch name" >&2
+        exit 1
+    fi
+
+    local repo_root
+    repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || {
+        echo "Error: not inside a git repository" >&2
+        exit 1
+    }
+    local repo_name
+    repo_name=$(basename "$repo_root")
+
+    # Resolve every branch to a worktree path; bail if any directory is missing.
+    local paths=() missing=()
+    local b dir_name p
+    for b in "${branches[@]}"; do
+        dir_name="${b//\//-}"
+        p="${repo_root}/../${repo_name}-${dir_name}"
+        if [[ ! -d "$p" ]]; then
+            missing+=("$b")
+        fi
+        paths+=("$p")
+    done
+    if (( ${#missing[@]} > 0 )); then
+        echo "Error: worktree directories not found for:" >&2
+        for b in "${missing[@]}"; do echo "  - $b" >&2; done
+        exit 1
+    fi
+
+    # Safety check phase — atomic. Collect all problems, then either abort
+    # cleanly (no removals) or proceed to remove every branch.
+    if [[ "$force" != "true" ]]; then
+        local blocked=()
+        local i=0
+        for b in "${branches[@]}"; do
+            p="${paths[$i]}"
+            local problems=()
+            if [[ -n "$(git -C "$p" status --porcelain 2>/dev/null)" ]]; then
+                problems+=("uncommitted changes")
+            fi
+            local upstream ahead
+            upstream=$(git -C "$p" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null) || upstream=""
+            if [[ -n "$upstream" ]]; then
+                ahead=$(git -C "$p" rev-list --count "${upstream}..HEAD" 2>/dev/null || echo 0)
+                if (( ahead > 0 )); then
+                    problems+=("${ahead} commit(s) ahead of ${upstream}")
+                fi
+            fi
+            if (( ${#problems[@]} > 0 )); then
+                local joined="${problems[*]}"
+                blocked+=("${b}: ${joined// /, }")
+            fi
+            i=$((i+1))
+        done
+        if (( ${#blocked[@]} > 0 )); then
+            echo "Refusing to remove (nothing was removed):" >&2
+            for line in "${blocked[@]}"; do echo "  - $line" >&2; done
+            echo "" >&2
+            echo "Push/commit your work, or re-run with --force to discard it." >&2
+            exit 1
+        fi
+    fi
+
+    # Remove phase. With --force, individual failures don't stop the rest.
+    local total=${#branches[@]} removed=0 failed=0
+    local i=0
+    for b in "${branches[@]}"; do
+        p="${paths[$i]}"
+        echo "[$((i+1))/${total}] Removing ${b} at ${p}..."
+        local rm_ok=0
+        if [[ "$force" == "true" ]]; then
+            git worktree remove --force "$p" && rm_ok=1 || true
+        else
+            git worktree remove "$p" && rm_ok=1 || true
+        fi
+        if (( rm_ok == 1 )); then
+            git branch -D "$b" 2>/dev/null || echo "  (branch not found or already deleted)"
+            removed=$((removed+1))
+        else
+            echo "  worktree removal failed" >&2
+            failed=$((failed+1))
+        fi
+        i=$((i+1))
+    done
+
+    echo ""
+    if (( failed > 0 )); then
+        echo "Done. Removed ${removed}/${total} (failed: ${failed})."
+        exit 1
+    else
+        echo "Done. Removed ${removed}/${total}."
+    fi
+}
+
 cmd_list() {
     git rev-parse --show-toplevel >/dev/null 2>&1 || {
         echo "Error: not inside a git repository" >&2
@@ -428,7 +538,7 @@ while [[ $# -gt 0 ]]; do
             usage
             exit 0
             ;;
-        create|remove|rm|list|ls|prune)
+        create|remove|rm|multi-remove|mrm|list|ls|prune)
             if [[ -n "$command" ]]; then
                 echo "Error: multiple commands provided: ${command} and $1" >&2
                 echo ""
@@ -521,6 +631,20 @@ case "$command" in
             exit 1
         fi
         ;;
+    multi-remove|mrm)
+        if [[ "$branch_provided" == "true" ]]; then
+            echo "Error: --branch is not valid for '${command}'; pass branch names as positional args" >&2
+            echo ""
+            usage
+            exit 1
+        fi
+        if [[ ${#positional_args[@]} -eq 0 ]]; then
+            echo "Error: '${command}' requires at least one branch name" >&2
+            echo ""
+            usage
+            exit 1
+        fi
+        ;;
     list|ls|prune)
         if [[ "$branch_provided" == "true" ]]; then
             echo "Error: --branch is not valid for '${command}'" >&2
@@ -546,6 +670,9 @@ case "$command" in
         ;;
     remove|rm)
         cmd_remove "$branch_name" "$force"
+        ;;
+    multi-remove|mrm)
+        cmd_multi_remove "$force" "${positional_args[@]}"
         ;;
     list|ls)
         cmd_list
