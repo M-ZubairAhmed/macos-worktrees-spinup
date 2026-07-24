@@ -475,12 +475,61 @@ cmd_list() {
         fi
     done < <(git worktree list --porcelain; printf '\n')
 
-    {
-        printf 'BranchName\tBaseBranch\tGitOrigin\tHeadCommit\tCreatedAt\tLocalPath\n'
+    local all_rows=()
+    all_rows+=("BranchName"$'\t'"BaseBranch"$'\t'"GitOrigin"$'\t'"HeadCommit"$'\t'"CreatedAt"$'\t'"LocalPath")
+    while IFS= read -r sorted_row; do
+        all_rows+=("$sorted_row")
+    done < <(
         for row in "${rows[@]}"; do
             printf '%s\n' "$row"
         done | sort -t $'\t' -k1,1n | cut -f2-
-    } | column -t -s $'\t'
+    )
+
+    # 0=BranchName 1=BaseBranch 2=GitOrigin 3=HeadCommit 4=CreatedAt 5=LocalPath
+    local visible=(0 1 2 4)
+    local ncols=${#visible[@]}
+    local widths=(0 0 0 0)
+    for row in "${all_rows[@]}"; do
+        IFS=$'\t' read -ra fields <<< "$row"
+        for vi in "${!visible[@]}"; do
+            local ci=${visible[$vi]} len=${#fields[${visible[$vi]}]}
+            (( len > widths[vi] )) && widths[vi]=$len
+        done
+    done
+
+    repeat_char() { local c="$1" n="$2" s="" j; for ((j=0;j<n;j++)); do s+="$c"; done; printf "%s" "$s"; }
+
+    draw_border() {
+        local type="$1" left mid right sep
+        case "$type" in
+            top) left="┌"; mid="┬"; right="┐"; sep="─" ;;
+            mid) left="├"; mid="┼"; right="┤"; sep="─" ;;
+            bot) left="└"; mid="┴"; right="┘"; sep="─" ;;
+        esac
+        printf "%s" "$left"
+        for i in "${!widths[@]}"; do
+            repeat_char "$sep" $(( widths[i] + 2 ))
+            (( i < ncols - 1 )) && printf "%s" "$mid"
+        done
+        printf "%s\n" "$right"
+    }
+
+    print_row() {
+        IFS=$'\t' read -ra fields <<< "$1"
+        printf "│"
+        for vi in $(seq 0 $(( ncols - 1 ))); do
+            printf " %-*s │" "${widths[$vi]}" "${fields[${visible[$vi]}]:-}"
+        done
+        printf "\n"
+    }
+
+    draw_border top
+    print_row "${all_rows[0]}"
+    draw_border mid
+    for i in $(seq 1 $(( ${#all_rows[@]} - 1 ))); do
+        print_row "${all_rows[$i]}"
+    done
+    draw_border bot
 }
 
 cmd_prune() {
