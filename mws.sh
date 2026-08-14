@@ -59,6 +59,25 @@ Commands:
 USAGE
 }
 
+# Print the path of the worktree that currently has <branch> checked out, if any.
+# Git allows a branch in only one worktree at a time, so this is what makes
+# 'git worktree add' fail with "already used by worktree at ...".
+worktree_holding_branch() {
+    local branch_name="$1"
+    local current_path=""
+    local line
+    while IFS= read -r line; do
+        case "$line" in
+            "worktree "*) current_path="${line#worktree }" ;;
+            "branch refs/heads/${branch_name}")
+                echo "$current_path"
+                return 0
+                ;;
+        esac
+    done < <(git worktree list --porcelain)
+    return 1
+}
+
 cmd_create() {
     local branch_name="$1"
     local base_branch="$2"
@@ -117,6 +136,22 @@ cmd_create() {
         else
             echo "Error: directory already exists and is not a git worktree: ${worktree_path}" >&2
             echo "Run './mws.sh remove ${branch_name}' first, or choose a different name." >&2
+            exit 1
+        fi
+    fi
+
+    # A branch can only be checked out in one worktree. Catch that here so the
+    # failure is explained up front instead of surfacing as a raw git error.
+    if [[ "$reused_existing_worktree" != "true" ]]; then
+        local holder
+        if holder=$(worktree_holding_branch "$branch_name"); then
+            echo "Error: branch '${branch_name}' is already checked out at: ${holder}" >&2
+            if [[ "$holder" == "$repo_root" ]]; then
+                echo "That is the repository you ran this from. Switch it to another branch first:" >&2
+                echo "  git -C '${holder}' switch ${base_branch}" >&2
+            else
+                echo "Use that worktree, or run './mws.sh remove ${branch_name}' first." >&2
+            fi
             exit 1
         fi
     fi
