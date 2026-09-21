@@ -521,9 +521,9 @@ cmd_list() {
     )
 
     # 0=BranchName 1=BaseBranch 2=GitOrigin 3=HeadCommit 4=CreatedAt 5=LocalPath
-    local visible=(0 1 2 4)
+    local visible=(0 1 2 4 5)
     local ncols=${#visible[@]}
-    local widths=(0 0 0 0)
+    local widths=(0 0 0 0 0)
     for row in "${all_rows[@]}"; do
         IFS=$'\t' read -ra fields <<< "$row"
         for vi in "${!visible[@]}"; do
